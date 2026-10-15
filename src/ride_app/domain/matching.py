@@ -1,45 +1,51 @@
-"""Eligibility and fallback are separate from driver-ranking strategy."""
+"""Eligibility and fallback are enforced before a pluggable ranking strategy runs."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import asin, cos, isfinite, radians, sin, sqrt
 from typing import Protocol
 
-from ride_app.domain.errors import FeatureNotImplemented
 from ride_app.domain.models import CarType, Driver, Location
+from ride_app.domain.validation import require
+
+EARTH_RADIUS_KM = 6371.0088
 
 
 def distance_km(origin: Location, destination: Location) -> float:
-    """Haversine distance used for matching, never for billed trip distance."""
-    raise FeatureNotImplemented("Geographic distance calculation")
+    """Haversine great-circle distance; this is not the billed trip distance."""
+    lat1, lat2 = radians(origin.latitude), radians(destination.latitude)
+    delta_lat = lat2 - lat1
+    delta_lng = radians(destination.longitude - origin.longitude)
+    haversine = sin(delta_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(delta_lng / 2) ** 2
+    # Clamp round-off near antipodal points before evaluating the inverse sine.
+    return 2 * EARTH_RADIUS_KM * asin(sqrt(min(1.0, max(0.0, haversine))))
 
 
 class MatchingStrategy(Protocol):
-    """Swappable ranking contract; implementations must not decide eligibility."""
+    """Rank eligible drivers only; eligibility rules are owned by DriverMatcher."""
 
-    def select(self, candidates: Sequence[Driver], pickup: Location) -> Driver:
-        """Rank already-eligible candidates; require a nonempty sequence."""
-        ...
+    def select(self, candidates: Sequence[Driver], pickup: Location) -> Driver: ...
 
 
 class NearestDriverStrategy:
-    """Default ranking policy; geographic calculation is pending implementation."""
+    """Deterministic default ranking: shortest distance, then ascending driver ID."""
 
     def select(self, candidates: Sequence[Driver], pickup: Location) -> Driver:
-        """Choose by distance, with a stable driver-ID tie-breaker."""
-        raise FeatureNotImplemented("Nearest-driver ranking")
+        require(bool(candidates), "NO_DRIVER_AVAILABLE", "No eligible driver is available.")
+        return min(
+            candidates, key=lambda driver: (distance_km(pickup, driver.cab.location), driver.id)
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
-    """Selected driver with pickup distance, distinct from the billed trip distance."""
+    """Selected driver and pickup distance, independent of completion distance."""
 
     driver: Driver
     pickup_distance_km: float
 
 
 class DriverMatcher:
-    """Own availability, radius, and car-type fallback before invoking ranking."""
-
     def __init__(self, strategy: MatchingStrategy) -> None:
         self._strategy = strategy
 
@@ -50,7 +56,28 @@ class DriverMatcher:
         requested_type: CarType,
         radius_km: float,
     ) -> MatchResult:
-        """Filter availability/radius, prefer requested type, then permitted upgrade."""
-        # Planned order: requested-type candidates first, then Hatchback-to-Sedan fallback.
-        # Even a nearer Sedan must not displace an eligible requested Hatchback.
-        raise FeatureNotImplemented("Driver eligibility and upgrade matching")
+        require(
+            isfinite(radius_km) and radius_km > 0,
+            "INVALID_RADIUS",
+            "Search radius must be finite and positive.",
+        )
+        require(isinstance(requested_type, CarType), "INVALID_CAR_TYPE", "Unsupported car type.")
+        eligible = tuple(
+            driver
+            for driver in drivers
+            if driver.is_available and distance_km(pickup, driver.cab.location) <= radius_km
+        )
+        candidates = tuple(driver for driver in eligible if driver.cab.car_type == requested_type)
+        # An eligible Hatchback always takes precedence over even a nearer Sedan.
+        if not candidates and requested_type == CarType.HATCHBACK:
+            candidates = tuple(
+                driver for driver in eligible if driver.cab.car_type == CarType.SEDAN
+            )
+        require(
+            bool(candidates),
+            "NO_DRIVER_AVAILABLE",
+            "No eligible driver is available within radius.",
+        )
+        selected = self._strategy.select(candidates, pickup)
+        require(selected in candidates, "INVALID_MATCH", "Strategy selected an ineligible driver.")
+        return MatchResult(selected, distance_km(pickup, selected.cab.location))

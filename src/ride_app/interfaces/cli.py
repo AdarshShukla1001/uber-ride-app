@@ -1,11 +1,12 @@
 """Interactive CLI: retain one application context across commands."""
 
 import argparse
+import json
 import shlex
 import sys
-from dataclasses import asdict
+from dataclasses import fields, is_dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from pprint import pprint
 
 from ride_app.application.contracts import (
     AddCouponCommand,
@@ -15,8 +16,8 @@ from ride_app.application.contracts import (
     RegisterUserCommand,
 )
 from ride_app.bootstrap import Application
-from ride_app.domain.errors import DomainError, FeatureNotImplemented
-from ride_app.domain.models import CarType, CouponTerms, DiscountType, Location
+from ride_app.domain.errors import DomainError
+from ride_app.domain.models import CarType, CouponTerms, DiscountType, Driver, Location, Ride
 
 
 def decimal_argument(value: str) -> Decimal:
@@ -133,10 +134,28 @@ def execute_command(application: Application, args: argparse.Namespace) -> objec
             raise ValueError("Unrecognized command")
 
 
+def to_json_value(value: object) -> object:
+    """Present domain results without coupling the CLI to HTTP/Pydantic schemas."""
+    if is_dataclass(value) and not isinstance(value, type):
+        result = {field.name: to_json_value(getattr(value, field.name)) for field in fields(value)}
+        if isinstance(value, Ride):
+            result["is_upgrade"] = value.is_upgrade
+        if isinstance(value, Driver):
+            result["is_available"] = value.is_available
+        return result
+    if isinstance(value, tuple):
+        return [to_json_value(item) for item in value]
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def run_cli(application: Application) -> int:
     """Reuse one context until exit; remember failures for scripted stdin exit codes."""
     parser = build_command_parser()
-    print("Ride CLI scaffold. Business operations are pending implementation.")
+    print("Ride CLI. Register users and drivers, book rides, and inspect receipts.")
     print("Enter 'help', '<resource> --help', or 'exit'. State is local to this session.")
     failed = False
     while True:
@@ -164,16 +183,11 @@ def run_cli(application: Application) -> int:
             continue
         try:
             result = execute_command(application, args)
-        except FeatureNotImplemented as exc:
-            print(f"NOT_IMPLEMENTED: {exc}", file=sys.stderr)
-            failed = True
         except DomainError as exc:
             print(f"{exc.code}: {exc.message}", file=sys.stderr)
             failed = True
         else:
-            if isinstance(result, tuple):
-                pprint([asdict(item) for item in result])
-            elif result is None:
+            if result is None:
                 print("Done.")
             else:
-                pprint(asdict(result))
+                print(json.dumps(to_json_value(result), indent=2))

@@ -1,8 +1,9 @@
-"""HTTP adapter. Scaffolded use cases return an explicit 501 response."""
+"""Thin HTTP adapter around the same validated services used by the CLI."""
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ride_app.application.contracts import (
     AddCouponCommand,
@@ -12,15 +13,19 @@ from ride_app.application.contracts import (
     RegisterUserCommand,
 )
 from ride_app.bootstrap import Application, create_application
-from ride_app.domain.errors import DomainError, FeatureNotImplemented
+from ride_app.domain.errors import DomainError
 from ride_app.domain.models import Coupon, CouponTerms, DiscountType, Driver, Ride, User
 from ride_app.interfaces.schemas import (
     AddCouponRequest,
     BookRideRequest,
     CompleteRideRequest,
+    CouponResponse,
+    DriverResponse,
     LocationRequest,
     RegisterDriverRequest,
     RegisterUserRequest,
+    RideResponse,
+    UserResponse,
 )
 
 
@@ -34,19 +39,8 @@ def create_api(application: Application | None = None) -> FastAPI:
     api = FastAPI(
         title="Ride Hailing Backend",
         version="0.1.0",
-        description=(
-            "Project scaffold. Business endpoints currently return 501; "
-            "domain workflows and output contracts are pending implementation."
-        ),
+        description="Ride booking, matching, tiered pricing, coupons, and ride histories.",
     )
-
-    @api.exception_handler(FeatureNotImplemented)
-    async def feature_pending(request: Request, exc: FeatureNotImplemented) -> JSONResponse:
-        """Expose scaffold status explicitly rather than report a successful operation."""
-        return JSONResponse(
-            status_code=501,
-            content={"error": {"code": "NOT_IMPLEMENTED", "message": str(exc)}},
-        )
 
     @api.exception_handler(DomainError)
     async def domain_error(request: Request, exc: DomainError) -> JSONResponse:
@@ -59,6 +53,8 @@ def create_api(application: Application | None = None) -> FastAPI:
             "DUPLICATE_CAB",
             "DUPLICATE_COUPON",
             "DRIVER_ALREADY_ON_RIDE",
+            "DUPLICATE_ID",
+            "INVALID_RIDE_STATE",
         }:
             status_code = 409
         else:
@@ -86,16 +82,31 @@ def create_api(application: Application | None = None) -> FastAPI:
             },
         )
 
+    @api.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": "HTTP_ERROR", "message": str(exc.detail)}},
+            headers=exc.headers,
+        )
+
     @api.get("/health", tags=["system"])
     def health() -> dict[str, str]:
-        """Report process responsiveness, not completion of business features."""
-        return {"status": "ok", "implementation": "scaffold"}
+        """Report process responsiveness without changing application state."""
+        return {"status": "ok"}
 
-    @api.post("/users", status_code=status.HTTP_201_CREATED, tags=["users"])
+    @api.post(
+        "/users", status_code=status.HTTP_201_CREATED, tags=["users"], response_model=UserResponse
+    )
     def register_user(body: RegisterUserRequest) -> User:
         return services.registration.register_user(RegisterUserCommand(name=body.name))
 
-    @api.post("/drivers", status_code=status.HTTP_201_CREATED, tags=["drivers"])
+    @api.post(
+        "/drivers",
+        status_code=status.HTTP_201_CREATED,
+        tags=["drivers"],
+        response_model=DriverResponse,
+    )
     def register_driver(body: RegisterDriverRequest) -> Driver:
         return services.registration.register_driver(
             RegisterDriverCommand(
@@ -106,11 +117,13 @@ def create_api(application: Application | None = None) -> FastAPI:
             )
         )
 
-    @api.patch("/drivers/{driver_id}/location", tags=["drivers"])
+    @api.patch("/drivers/{driver_id}/location", tags=["drivers"], response_model=DriverResponse)
     def update_location(driver_id: str, body: LocationRequest) -> Driver:
         return services.registration.update_driver_location(driver_id, body.to_domain())
 
-    @api.post("/rides", status_code=status.HTTP_201_CREATED, tags=["rides"])
+    @api.post(
+        "/rides", status_code=status.HTTP_201_CREATED, tags=["rides"], response_model=RideResponse
+    )
     def book_ride(body: BookRideRequest) -> Ride:
         return services.rides.book_ride(
             BookRideCommand(
@@ -121,7 +134,7 @@ def create_api(application: Application | None = None) -> FastAPI:
             )
         )
 
-    @api.post("/rides/{ride_id}/complete", tags=["rides"])
+    @api.post("/rides/{ride_id}/complete", tags=["rides"], response_model=RideResponse)
     def complete_ride(ride_id: str, body: CompleteRideRequest) -> Ride:
         return services.rides.complete_ride(
             CompleteRideCommand(
@@ -131,19 +144,24 @@ def create_api(application: Application | None = None) -> FastAPI:
             )
         )
 
-    @api.get("/rides/{ride_id}", tags=["rides"])
+    @api.get("/rides/{ride_id}", tags=["rides"], response_model=RideResponse)
     def get_ride(ride_id: str) -> Ride:
         return services.rides.get_ride(ride_id)
 
-    @api.get("/users/{user_id}/rides", tags=["users"])
+    @api.get("/users/{user_id}/rides", tags=["users"], response_model=list[RideResponse])
     def user_history(user_id: str) -> tuple[Ride, ...]:
         return services.rides.get_user_history(user_id)
 
-    @api.get("/drivers/{driver_id}/rides", tags=["drivers"])
+    @api.get("/drivers/{driver_id}/rides", tags=["drivers"], response_model=list[RideResponse])
     def driver_history(driver_id: str) -> tuple[Ride, ...]:
         return services.rides.get_driver_history(driver_id)
 
-    @api.post("/coupons", status_code=status.HTTP_201_CREATED, tags=["coupons"])
+    @api.post(
+        "/coupons",
+        status_code=status.HTTP_201_CREATED,
+        tags=["coupons"],
+        response_model=CouponResponse,
+    )
     def add_coupon(body: AddCouponRequest) -> Coupon:
         return services.coupons.add_coupon(
             AddCouponCommand(

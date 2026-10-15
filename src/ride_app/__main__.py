@@ -4,15 +4,15 @@ import argparse
 import sys
 
 from ride_app.bootstrap import create_application
-from ride_app.domain.errors import FeatureNotImplemented
+from ride_app.domain.errors import DomainError
 
 
 def main(argv: list[str] | None = None) -> int:
     """Select a runtime mode and return a shell-compatible exit code."""
-    parser = argparse.ArgumentParser(prog="ride-app", description="Ride-hailing backend scaffold")
+    parser = argparse.ArgumentParser(prog="ride-app", description="Ride-hailing backend")
     modes = parser.add_subparsers(dest="mode", required=True)
     modes.add_parser("cli", help="Start a standalone interactive CLI")
-    modes.add_parser("demo", help="Reserved for the upcoming end-to-end demonstration")
+    modes.add_parser("demo", help="Run the deterministic end-to-end demonstration")
     serve = modes.add_parser("serve", help="Start the single-worker HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", default=8000, type=int)
@@ -32,9 +32,11 @@ def main(argv: list[str] | None = None) -> int:
             # Multiple workers would own isolated dictionaries and unrelated locks.
             uvicorn.run(create_api(), host=args.host, port=args.port, workers=1)
             return 0
-        raise FeatureNotImplemented("End-to-end ride demo")
-    except FeatureNotImplemented as exc:
-        print(f"NOT_IMPLEMENTED: {exc}", file=sys.stderr)
+        from ride_app.interfaces.demo import run_demo
+
+        return run_demo()
+    except DomainError as exc:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130

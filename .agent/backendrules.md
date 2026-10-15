@@ -1,6 +1,6 @@
 # Backend Engineering Rules — Python Ride Hailing
 
-Status: implementation guidance; project scaffold initialization authorized. Business workflows remain pending implementation.
+Status: mandatory backend behavior implemented with automated tests; these rules govern further changes.
 
 ## 1. Scope and precedence
 
@@ -134,7 +134,7 @@ classDiagram
 
 Enums: `CarType = HATCHBACK | SEDAN`; `RideStatus = ONGOING | COMPLETED`; initial `DiscountType = PERCENTAGE`. Add FLAT only with its implementation and tests. No unused cancellation states.
 
-Use frozen dataclasses and immutable nested collections for Location, RateCard, PricingTier, CouponTerms, BookingTerms, and FareBreakdown. Frozen outer objects containing mutable lists are not sufficient snapshots. The scaffold also makes User, Driver, Cab, Coupon, and Ride immutable: future lifecycle operations return validated replacements, staged before repository writes. Diagram transition methods describe responsibilities; they need not mutate objects. Optional fields must agree with ride status: completed rides require distance, drop-off, completion time, and receipt. Model invariant checks are implemented alongside the corresponding use cases.
+Use frozen dataclasses and immutable nested collections for Location, RateCard, PricingTier, CouponTerms, BookingTerms, and FareBreakdown. Frozen outer objects containing mutable lists are not sufficient snapshots. User, Driver, Cab, Coupon, and Ride are also immutable: lifecycle operations return validated replacements, staged before repository writes. Diagram transition methods describe responsibilities; they need not mutate objects. Optional fields must agree with ride status: completed rides require distance, drop-off, completion time, and receipt. Model invariant checks are implemented alongside the corresponding use cases.
 
 ## 5. Service and policy class plan
 
@@ -266,7 +266,7 @@ Completion validates inputs, returns a stored receipt for completed rides, calcu
 
 - Shared command/result dataclasses belong in application contracts; Pydantic schemas stay in the HTTP adapter.
 - Validate request shape at transport boundaries and enforce business invariants in the core so CLI cannot bypass them.
-- Represent money in JSON as two-decimal strings. Use timezone-aware UTC timestamps.
+- Represent fare amounts and minimum fares in JSON as two-decimal strings. Preserve precision for per-kilometer rates and trip distances. Use timezone-aware UTC timestamps.
 - Keep domain errors independent of HTTP status codes.
 - Suggested API mappings: creation 201, normal reads/completion/location update 200, coupon deletion 204; unknown entities 404, assignment conflicts or no driver 409, invalid fields/coupon 422.
 - Normalize framework validation errors into the same documented error envelope where practical.
@@ -338,4 +338,4 @@ Run appropriate tests during implementation and the full suite before delivery. 
 - Review AI-generated code for incorrect rounding, mutable snapshots, partial mutations, redundant abstractions, and missing edge cases.
 - Keep the README's AI usage note factual: what was requested, accepted, corrected, or rejected and why.
 
-Planning documents are complete when they agree on behavior and scope. The user has now requested project and class initialization. Initialize the scaffold with explicit unimplemented operations; complete business behavior in subsequent implementation stages.
+The user authorized sequential implementation of the mandatory scope. Keep the PRD, diagrams, tests, and implementation consistent as behavior evolves; do not introduce placeholder success responses.

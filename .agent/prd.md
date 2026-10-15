@@ -1,6 +1,6 @@
 # Ride Hailing Backend — Product Requirements
 
-Status: approved planning baseline; project scaffold initialization authorized. Business workflows remain pending implementation.
+Status: mandatory behavior implemented through CLI and API; automated acceptance tests and deterministic demo available. Optional bonus features remain deferred as described below.
 
 ## 1. Purpose and source
 
@@ -58,6 +58,7 @@ These decisions resolve details absent from the assignment and must appear in th
 | Ride start | Successful booking starts the ride immediately. |
 | Active rides | At most one ongoing ride per user and per driver. |
 | Coordinates | Latitude and longitude in degrees; validate finite values and geographic ranges. |
+| Decimal limits | Arithmetic uses Python Decimal's default precision; amounts outside supported precision are rejected. |
 | Matching distance | Haversine distance in kilometers. |
 | Search radius | Application configuration, default 5 km; boundary inclusive. This default is an assumption. |
 | Matching order | Eligible requested-type drivers first; nearest distance, then stable driver ID for ties. |
@@ -177,7 +178,7 @@ python -m ride_app serve
 
 The local CLI retains state inside one interactive session. The demo runs a scenario in one process. The API uses one worker and retains state until exit. Separate processes do not share memory. Optional remote CLI mode must call the API rather than pretend to share local dictionaries.
 
-API money values are decimal strings with two fractional digits. Use UTC ISO-8601 timestamps. Return machine-readable errors with a stable code, message, and optional field details. CLI presents equivalent errors and keeps interactive sessions running after invalid commands; failed noninteractive scripts return a nonzero exit status.
+API fare amounts and minimum fares are decimal strings with two fractional digits. Per-kilometer rates, percentages, and trip distances retain their supplied decimal precision. Use UTC ISO-8601 timestamps. Return machine-readable errors with a stable code, message, and optional field details. CLI presents equivalent errors and keeps interactive sessions running after invalid commands; failed noninteractive scripts return a nonzero exit status.
 
 ## 8. Verification and demonstration
 
