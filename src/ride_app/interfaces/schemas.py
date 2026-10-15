@@ -4,9 +4,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
 
-from ride_app.domain.models import CarType, DiscountType, Location, RideStatus
+from ride_app.domain.models import CarType, CouponTerms, DiscountType, Location, RideStatus
 
 type MoneyAmount = Annotated[
     Decimal, PlainSerializer(lambda value: format(value, ".2f"), return_type=str)
@@ -43,6 +43,7 @@ class RegisterDriverRequest(RequestModel):
     registration_number: str = Field(min_length=1)
     car_type: CarType
     location: LocationRequest
+    rating: Decimal | None = Field(default=None, ge=0, le=5, allow_inf_nan=False)
 
 
 class BookRideRequest(RequestModel):
@@ -61,11 +62,32 @@ class CompleteRideRequest(RequestModel):
     dropoff: LocationRequest
 
 
+class CancelRideRequest(RequestModel):
+    reason: str = Field(default="Cancelled by rider", min_length=1)
+
+
 class AddCouponRequest(RequestModel):
-    """Initial HTTP contract supports percentage coupons only."""
+    """Accept legacy percentage or explicit kind/value, never both."""
 
     code: str = Field(min_length=1)
-    percentage: Decimal = Field(gt=0, le=100, allow_inf_nan=False)
+    percentage: Decimal | None = Field(default=None, gt=0, le=100, allow_inf_nan=False)
+    discount_type: DiscountType | None = None
+    value: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_shape(self):
+        legacy = self.percentage is not None
+        explicit = self.discount_type is not None and self.value is not None
+        if (legacy and (self.discount_type is not None or self.value is not None)) or not (
+            legacy or explicit
+        ):
+            raise ValueError("Supply percentage, or discount_type and value, exclusively.")
+        return self
+
+    def to_terms(self) -> CouponTerms:
+        if self.percentage is not None:
+            return CouponTerms(DiscountType.PERCENTAGE, self.percentage)
+        return CouponTerms(self.discount_type, self.value)
 
 
 # Output schemas keep HTTP contracts explicit while services return domain records.
@@ -96,6 +118,7 @@ class DriverResponse(ResponseModel):
     cab: CabResponse
     active_ride_id: str | None
     is_available: bool
+    rating: Decimal | None
 
 
 class PricingTierResponse(ResponseModel):
@@ -121,10 +144,24 @@ class CouponResponse(ResponseModel):
     terms: CouponTermsResponse
 
 
+class CancellationTermsResponse(ResponseModel):
+    grace_seconds: int
+    fee: MoneyAmount
+
+
+class CancellationResponse(ResponseModel):
+    cancelled_at: datetime
+    fee: MoneyAmount
+    reason: str
+
+
 class BookingTermsResponse(ResponseModel):
     rate_card: RateCardResponse
     coupon_terms: CouponTermsResponse | None
     coupon_code: str | None
+    surge_multiplier: Decimal
+    cancellation_terms: CancellationTermsResponse
+    allowed_assignment_types: tuple[CarType, ...]
 
 
 class FareResponse(ResponseModel):
@@ -132,6 +169,7 @@ class FareResponse(ResponseModel):
     minimum_fare_adjustment: MoneyAmount
     discount: MoneyAmount
     total: MoneyAmount
+    surge_adjustment: MoneyAmount
 
 
 class RideResponse(ResponseModel):
@@ -149,3 +187,4 @@ class RideResponse(ResponseModel):
     completed_at: datetime | None
     distance_km: Decimal | None
     receipt: FareResponse | None
+    cancellation: CancellationResponse | None

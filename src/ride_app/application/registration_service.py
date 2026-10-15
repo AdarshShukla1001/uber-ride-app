@@ -49,6 +49,7 @@ class RegistrationService:
                     command.car_type,
                     command.location,
                 ),
+                rating=command.rating,
             )
             require(
                 self._drivers.find_by_id(driver.id) is None,

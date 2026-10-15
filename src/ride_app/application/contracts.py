@@ -25,6 +25,7 @@ class RegisterDriverCommand:
     registration_number: str
     car_type: CarType
     location: Location
+    rating: Decimal | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", clean_text(self.name, "name", "INVALID_NAME"))
@@ -37,6 +38,9 @@ class RegisterDriverCommand:
                 "INVALID_REGISTRATION",
             ),
         )
+        if self.rating is not None:
+            nonnegative_decimal(self.rating, "rating", "INVALID_RATING")
+            require(self.rating <= 5, "INVALID_RATING", "Rating must be between 0 and 5.")
         require(isinstance(self.car_type, CarType), "INVALID_CAR_TYPE", "Unsupported car type.")
         require(isinstance(self.location, Location), "INVALID_LOCATION", "A location is required.")
 
@@ -92,3 +96,13 @@ class AddCouponCommand:
     def __post_init__(self) -> None:
         object.__setattr__(self, "code", normalized_code(self.code, "code", "INVALID_COUPON"))
         require(isinstance(self.terms, CouponTerms), "INVALID_COUPON", "Coupon terms are required.")
+
+
+@dataclass(frozen=True, slots=True)
+class CancelRideCommand:
+    ride_id: str
+    reason: str = "Cancelled by rider"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ride_id", clean_text(self.ride_id, "ride_id"))
+        object.__setattr__(self, "reason", clean_text(self.reason, "reason"))

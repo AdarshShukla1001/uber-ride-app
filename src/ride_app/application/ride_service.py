@@ -1,18 +1,27 @@
 """Coordinate booking and completion; calculation remains in domain policies."""
 
-from ride_app.application.contracts import BookRideCommand, CompleteRideCommand
+from ride_app.application.contracts import BookRideCommand, CancelRideCommand, CompleteRideCommand
 from ride_app.application.ports import (
     Clock,
     CouponRepository,
     DriverRepository,
     IdGenerator,
+    MarketConditionsProvider,
     MutationGuard,
     RateCardCatalog,
     RideRepository,
     UserRepository,
 )
 from ride_app.domain.matching import DriverMatcher
-from ride_app.domain.models import BookingTerms, Ride, RideStatus
+from ride_app.domain.models import (
+    BookingTerms,
+    CancellationDetails,
+    CancellationTerms,
+    Ride,
+    RideStatus,
+    UpgradeRules,
+)
+from ride_app.domain.policies import CancellationFeePolicy, SurgePolicy
 from ride_app.domain.pricing import PricingEngine
 from ride_app.domain.validation import clean_text, require
 
@@ -37,6 +46,11 @@ class RideService:
         clock: Clock,
         new_id: IdGenerator,
         search_radius_km: float,
+        surge: SurgePolicy,
+        market: MarketConditionsProvider,
+        cancellation: CancellationFeePolicy,
+        cancellation_terms: CancellationTerms,
+        upgrades: UpgradeRules,
     ) -> None:
         self._users = users
         self._drivers = drivers
@@ -49,6 +63,11 @@ class RideService:
         self._clock = clock
         self._new_id = new_id
         self._search_radius_km = search_radius_km
+        self._surge = surge
+        self._market = market
+        self._cancellation = cancellation
+        self._cancellation_terms = cancellation_terms
+        self._upgrades = upgrades
 
     def book_ride(self, command: BookRideCommand) -> Ride:
         """Capture requested-type pricing and reserve one driver under the shared guard."""
@@ -82,6 +101,11 @@ class RideService:
                 rate_card=self._rate_cards.get_for(command.requested_type),
                 coupon_terms=coupon.terms if coupon else None,
                 coupon_code=coupon.code if coupon else None,
+                surge_multiplier=self._surge.multiplier(
+                    self._market.snapshot(command.pickup, command.requested_type)
+                ),
+                cancellation_terms=self._cancellation_terms,
+                allowed_assignment_types=self._upgrades.types_for(command.requested_type),
             )
             ride = Ride(
                 id=self._new_id(),
@@ -111,6 +135,11 @@ class RideService:
             ride = self._require_ride(command.ride_id)
             if ride.status == RideStatus.COMPLETED:
                 return ride
+            require(
+                ride.status == RideStatus.ONGOING,
+                "INVALID_RIDE_STATE",
+                "Cancelled rides cannot be completed.",
+            )
             driver = self._drivers.find_by_id(ride.driver_id)
             require(driver is not None, "DRIVER_NOT_FOUND", "Driver does not exist.")
             receipt = self._pricing.calculate(command.distance_km, ride.terms)
@@ -119,6 +148,29 @@ class RideService:
             self._rides.save(completed)
             self._drivers.save(released)
             return completed
+
+    def cancel_ride(self, command: CancelRideCommand) -> Ride:
+        """Cancel once under the same guard as booking and completion."""
+        with self._guard.exclusive():
+            ride = self._require_ride(command.ride_id)
+            if ride.status == RideStatus.CANCELLED:
+                return ride
+            require(
+                ride.status == RideStatus.ONGOING,
+                "INVALID_RIDE_STATE",
+                "Completed rides cannot be cancelled.",
+            )
+            driver = self._drivers.find_by_id(ride.driver_id)
+            require(driver is not None, "DRIVER_NOT_FOUND", "Driver does not exist.")
+            now = self._clock()
+            details = CancellationDetails(
+                now, self._cancellation.calculate(ride, now), command.reason
+            )
+            cancelled = ride.cancel(details)
+            released = driver.release_ride(ride.id)
+            self._rides.save(cancelled)
+            self._drivers.save(released)
+            return cancelled
 
     def _require_ride(self, ride_id: str) -> Ride:
         ride = self._rides.find_by_id(ride_id)

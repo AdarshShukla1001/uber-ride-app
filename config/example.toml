@@ -1,0 +1,32 @@
+# Pass with: python -m ride_app cli --config config/example.toml
+# Or: python -m ride_app serve --config config/example.toml
+[matching]
+radius_km = 5
+strategy = "highest_rated" # nearest | highest_rated
+
+[surge]
+policy = "demand_supply" # none | demand_supply
+maximum = "3"
+sensitivity = "0.5"
+
+[cancellation]
+policy = "grace_period" # free | grace_period
+grace_seconds = 120
+fee = "20.00"
+
+# Ordered choices; exact requested type must be first. Defaults exclude SUV upgrades.
+[upgrades]
+hatchback = ["hatchback", "sedan", "suv"]
+sedan = ["sedan", "suv"]
+suv = ["suv"]
+
+# Omitted categories retain default rates. An override supplies the complete card.
+[rates.hatchback]
+version = "hatchback-v2"
+minimum_fare = "50.00"
+tiers = [
+  { upper_bound_km = "2", rate_per_km = "10" },
+  { upper_bound_km = "5", rate_per_km = "8" },
+  { upper_bound_km = "10", rate_per_km = "5" },
+  { rate_per_km = "3" }, # Omit the upper bound only on the final tier.
+]

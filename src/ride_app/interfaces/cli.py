@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from ride_app.application.contracts import (
     AddCouponCommand,
     BookRideCommand,
+    CancelRideCommand,
     CompleteRideCommand,
     RegisterDriverCommand,
     RegisterUserCommand,
@@ -52,6 +53,7 @@ def build_command_parser() -> argparse.ArgumentParser:
     driver_register.add_argument("--name", required=True)
     driver_register.add_argument("--registration-number", required=True)
     driver_register.add_argument("--type", choices=list(CarType), required=True)
+    driver_register.add_argument("--rating", type=decimal_argument)
     add_location_arguments(driver_register)
     driver_location = driver.add_parser("location")
     driver_location.add_argument("--driver", required=True)
@@ -68,12 +70,17 @@ def build_command_parser() -> argparse.ArgumentParser:
     end.add_argument("--ride", required=True)
     end.add_argument("--distance-km", type=decimal_argument, required=True)
     add_location_arguments(end)
+    cancel = rides.add_parser("cancel")
+    cancel.add_argument("--ride", required=True)
+    cancel.add_argument("--reason", default="Cancelled by rider")
     rides.add_parser("show").add_argument("--ride", required=True)
 
     coupons = resources.add_parser("coupon").add_subparsers(dest="action", required=True)
     add_coupon = coupons.add_parser("add")
     add_coupon.add_argument("--code", required=True)
-    add_coupon.add_argument("--percentage", type=decimal_argument, required=True)
+    discount = add_coupon.add_mutually_exclusive_group(required=True)
+    discount.add_argument("--percentage", type=decimal_argument)
+    discount.add_argument("--flat", type=decimal_argument)
     coupons.add_parser("delete").add_argument("--code", required=True)
     return parser
 
@@ -91,6 +98,7 @@ def execute_command(application: Application, args: argparse.Namespace) -> objec
                     name=args.name,
                     registration_number=args.registration_number,
                     car_type=CarType(args.type),
+                    rating=args.rating,
                     location=Location(args.lat, args.lng),
                 )
             )
@@ -118,13 +126,17 @@ def execute_command(application: Application, args: argparse.Namespace) -> objec
                     dropoff=Location(args.lat, args.lng),
                 )
             )
+        case ("ride", "cancel"):
+            return application.rides.cancel_ride(CancelRideCommand(args.ride, args.reason))
         case ("ride", "show"):
             return application.rides.get_ride(args.ride)
         case ("coupon", "add"):
             return application.coupons.add_coupon(
                 AddCouponCommand(
                     code=args.code,
-                    terms=CouponTerms(DiscountType.PERCENTAGE, args.percentage),
+                    terms=CouponTerms(DiscountType.PERCENTAGE, args.percentage)
+                    if args.percentage is not None
+                    else CouponTerms(DiscountType.FLAT, args.flat),
                 )
             )
         case ("coupon", "delete"):

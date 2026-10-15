@@ -8,16 +8,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from ride_app.application.contracts import (
     AddCouponCommand,
     BookRideCommand,
+    CancelRideCommand,
     CompleteRideCommand,
     RegisterDriverCommand,
     RegisterUserCommand,
 )
 from ride_app.bootstrap import Application, create_application
 from ride_app.domain.errors import DomainError
-from ride_app.domain.models import Coupon, CouponTerms, DiscountType, Driver, Ride, User
+from ride_app.domain.models import Coupon, Driver, Ride, User
 from ride_app.interfaces.schemas import (
     AddCouponRequest,
     BookRideRequest,
+    CancelRideRequest,
     CompleteRideRequest,
     CouponResponse,
     DriverResponse,
@@ -114,6 +116,7 @@ def create_api(application: Application | None = None) -> FastAPI:
                 registration_number=body.registration_number,
                 car_type=body.car_type,
                 location=body.location.to_domain(),
+                rating=body.rating,
             )
         )
 
@@ -144,6 +147,10 @@ def create_api(application: Application | None = None) -> FastAPI:
             )
         )
 
+    @api.post("/rides/{ride_id}/cancel", tags=["rides"], response_model=RideResponse)
+    def cancel_ride(ride_id: str, body: CancelRideRequest) -> Ride:
+        return services.rides.cancel_ride(CancelRideCommand(ride_id, body.reason))
+
     @api.get("/rides/{ride_id}", tags=["rides"], response_model=RideResponse)
     def get_ride(ride_id: str) -> Ride:
         return services.rides.get_ride(ride_id)
@@ -166,7 +173,7 @@ def create_api(application: Application | None = None) -> FastAPI:
         return services.coupons.add_coupon(
             AddCouponCommand(
                 code=body.code,
-                terms=CouponTerms(discount_type=DiscountType.PERCENTAGE, value=body.percentage),
+                terms=body.to_terms(),
             )
         )
 

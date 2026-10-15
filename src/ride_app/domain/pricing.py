@@ -3,7 +3,7 @@
 from decimal import ROUND_HALF_UP, Decimal, DecimalException
 
 from ride_app.domain.errors import DomainError
-from ride_app.domain.models import BookingTerms, CouponTerms, FareBreakdown, RateCard
+from ride_app.domain.models import BookingTerms, CouponTerms, DiscountType, FareBreakdown, RateCard
 from ride_app.domain.validation import nonnegative_decimal
 
 PAISE = Decimal("0.01")
@@ -37,19 +37,31 @@ def calculate_discount(subtotal: Decimal, terms: CouponTerms | None) -> Decimal:
     nonnegative_decimal(subtotal, "subtotal")
     if terms is None:
         return Decimal("0.00")
-    return min(subtotal, round_money(subtotal * terms.value / Decimal("100")))
+    discount = (
+        subtotal * terms.value / Decimal("100")
+        if terms.discount_type == DiscountType.PERCENTAGE
+        else terms.value
+    )
+    return min(subtotal, round_money(discount))
 
 
 class PricingEngine:
     """Consume captured terms, with no database lookup or current-time dependency."""
 
     def calculate(self, distance_km: Decimal, terms: BookingTerms) -> FareBreakdown:
-        distance_charge = calculate_distance_charge(distance_km, terms.rate_card)
-        subtotal = max(distance_charge, terms.rate_card.minimum_fare)
-        discount = calculate_discount(subtotal, terms.coupon_terms)
-        return FareBreakdown(
-            distance_charge=distance_charge,
-            minimum_fare_adjustment=round_money(subtotal - distance_charge),
-            discount=round_money(discount),
-            total=round_money(subtotal - discount),
-        )
+        try:
+            distance_charge = calculate_distance_charge(distance_km, terms.rate_card)
+            base = max(distance_charge, terms.rate_card.minimum_fare)
+            subtotal = round_money(base * terms.surge_multiplier)
+            discount = calculate_discount(subtotal, terms.coupon_terms)
+            return FareBreakdown(
+                distance_charge=distance_charge,
+                minimum_fare_adjustment=round_money(base - distance_charge),
+                surge_adjustment=round_money(subtotal - base),
+                discount=round_money(discount),
+                total=round_money(subtotal - discount),
+            )
+        except DecimalException as exc:
+            raise DomainError(
+                "INVALID_AMOUNT", "Fare exceeds supported decimal precision."
+            ) from exc

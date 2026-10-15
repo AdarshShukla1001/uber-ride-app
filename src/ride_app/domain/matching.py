@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from math import asin, cos, isfinite, radians, sin, sqrt
 from typing import Protocol
 
-from ride_app.domain.models import CarType, Driver, Location
+from ride_app.domain.models import CarType, Driver, Location, UpgradeRules
 from ride_app.domain.validation import require
 
 EARTH_RADIUS_KM = 6371.0088
@@ -37,6 +37,22 @@ class NearestDriverStrategy:
         )
 
 
+class HighestRatedDriverStrategy:
+    """Rated drivers first, then rating descending, distance and ID ascending."""
+
+    def select(self, candidates: Sequence[Driver], pickup: Location) -> Driver:
+        require(bool(candidates), "NO_DRIVER_AVAILABLE", "No eligible driver is available.")
+        return min(
+            candidates,
+            key=lambda driver: (
+                driver.rating is None,
+                -driver.rating if driver.rating is not None else 0,
+                distance_km(pickup, driver.cab.location),
+                driver.id,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class MatchResult:
     """Selected driver and pickup distance, independent of completion distance."""
@@ -46,8 +62,9 @@ class MatchResult:
 
 
 class DriverMatcher:
-    def __init__(self, strategy: MatchingStrategy) -> None:
+    def __init__(self, strategy: MatchingStrategy, upgrades: UpgradeRules | None = None) -> None:
         self._strategy = strategy
+        self._upgrades = upgrades if upgrades is not None else UpgradeRules()
 
     def match(
         self,
@@ -67,12 +84,11 @@ class DriverMatcher:
             for driver in drivers
             if driver.is_available and distance_km(pickup, driver.cab.location) <= radius_km
         )
-        candidates = tuple(driver for driver in eligible if driver.cab.car_type == requested_type)
-        # An eligible Hatchback always takes precedence over even a nearer Sedan.
-        if not candidates and requested_type == CarType.HATCHBACK:
-            candidates = tuple(
-                driver for driver in eligible if driver.cab.car_type == CarType.SEDAN
-            )
+        candidates = ()
+        for car_type in self._upgrades.types_for(requested_type):
+            candidates = tuple(driver for driver in eligible if driver.cab.car_type == car_type)
+            if candidates:
+                break
         require(
             bool(candidates),
             "NO_DRIVER_AVAILABLE",

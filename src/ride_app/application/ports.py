@@ -5,7 +5,8 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol
 
-from ride_app.domain.models import CarType, Coupon, Driver, RateCard, Ride, User
+from ride_app.domain.models import CarType, Coupon, Driver, Location, RateCard, Ride, User
+from ride_app.domain.policies import MarketConditions
 
 # Callables allow deterministic time and IDs in tests without global monkeypatching.
 type Clock = Callable[[], datetime]
@@ -33,6 +34,7 @@ class RideRepository(Protocol):
 
     def save(self, ride: Ride) -> None: ...
     def find_by_id(self, ride_id: str) -> Ride | None: ...
+    def find_ongoing(self) -> tuple[Ride, ...]: ...
     def find_active_by_user(self, user_id: str) -> Ride | None: ...
     def find_by_user(self, user_id: str) -> tuple[Ride, ...]: ...
     def find_by_driver(self, driver_id: str) -> tuple[Ride, ...]: ...
@@ -55,3 +57,9 @@ class MutationGuard(Protocol):
     """Coordinate state access in one process; this contract does not promise rollback."""
 
     def exclusive(self) -> AbstractContextManager[None]: ...
+
+
+class MarketConditionsProvider(Protocol):
+    """Read a local demand/supply snapshot before the current driver is reserved."""
+
+    def snapshot(self, pickup: Location, requested_type: CarType) -> "MarketConditions": ...

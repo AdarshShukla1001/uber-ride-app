@@ -59,6 +59,9 @@ class InMemoryRideRepository:
     def find_by_id(self, ride_id: str) -> Ride | None:
         return self._records.get(ride_id)
 
+    def find_ongoing(self) -> tuple[Ride, ...]:
+        return tuple(ride for ride in self._records.values() if ride.status == RideStatus.ONGOING)
+
     def find_active_by_user(self, user_id: str) -> Ride | None:
         return next(
             (

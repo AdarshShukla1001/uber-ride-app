@@ -4,7 +4,7 @@ Money and billed distance use Decimal. Coordinates use floats for geographic mat
 No domain model depends on HTTP, CLI parsing, or a particular storage adapter.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -26,6 +26,7 @@ class CarType(StrEnum):
 
     HATCHBACK = "hatchback"
     SEDAN = "sedan"
+    SUV = "suv"
 
 
 class RideStatus(StrEnum):
@@ -33,12 +34,77 @@ class RideStatus(StrEnum):
 
     ONGOING = "ongoing"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class DiscountType(StrEnum):
     """Only expose discount kinds supported by the initial release."""
 
     PERCENTAGE = "percentage"
+    FLAT = "flat"
+
+
+@dataclass(frozen=True, slots=True)
+class UpgradeRules:
+    """Ordered allowed assignments; exact type always has first priority."""
+
+    routes: tuple[tuple[CarType, tuple[CarType, ...]], ...] = (
+        (CarType.HATCHBACK, (CarType.HATCHBACK, CarType.SEDAN)),
+        (CarType.SEDAN, (CarType.SEDAN,)),
+        (CarType.SUV, (CarType.SUV,)),
+    )
+
+    def __post_init__(self) -> None:
+        require(isinstance(self.routes, tuple), "INVALID_UPGRADES", "Routes must be immutable.")
+        seen = set()
+        for requested, allowed in self.routes:
+            require(
+                isinstance(requested, CarType) and requested not in seen,
+                "INVALID_UPGRADES",
+                "Each car type needs one route.",
+            )
+            require(
+                isinstance(allowed, tuple)
+                and bool(allowed)
+                and allowed[0] == requested
+                and all(isinstance(kind, CarType) for kind in allowed)
+                and len(set(allowed)) == len(allowed),
+                "INVALID_UPGRADES",
+                "Routes must start with requested type and have no duplicates.",
+            )
+            seen.add(requested)
+        require(seen == set(CarType), "INVALID_UPGRADES", "Routes must cover every car type.")
+
+    def types_for(self, requested: CarType) -> tuple[CarType, ...]:
+        return next(allowed for kind, allowed in self.routes if kind == requested)
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationTerms:
+    """Booking-time fee terms; free through the inclusive grace period."""
+
+    grace_seconds: int = 120
+    fee: Decimal = Decimal("20.00")
+
+    def __post_init__(self) -> None:
+        require(
+            type(self.grace_seconds) is int and self.grace_seconds >= 0,
+            "INVALID_CANCELLATION",
+            "Grace period must be nonnegative whole seconds.",
+        )
+        money(self.fee, "cancellation fee")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationDetails:
+    cancelled_at: datetime
+    fee: Decimal
+    reason: str
+
+    def __post_init__(self) -> None:
+        aware_time(self.cancelled_at, "cancelled_at")
+        money(self.fee, "cancellation fee")
+        object.__setattr__(self, "reason", clean_text(self.reason, "reason"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,11 +168,15 @@ class Driver:
     name: str
     cab: Cab
     active_ride_id: str | None = None
+    rating: Decimal | None = None
 
     def __post_init__(self) -> None:
         clean_text(self.id, "driver_id")
         object.__setattr__(self, "name", clean_text(self.name, "name", "INVALID_NAME"))
         require(isinstance(self.cab, Cab), "INVALID_REGISTRATION", "A cab is required.")
+        if self.rating is not None:
+            nonnegative_decimal(self.rating, "rating", "INVALID_RATING")
+            require(self.rating <= 5, "INVALID_RATING", "Rating must be between 0 and 5.")
         if self.active_ride_id is not None:
             clean_text(self.active_ride_id, "active_ride_id")
 
@@ -190,14 +260,16 @@ class CouponTerms:
 
     def __post_init__(self) -> None:
         require(
-            self.discount_type is DiscountType.PERCENTAGE,
+            isinstance(self.discount_type, DiscountType),
             "INVALID_COUPON",
             "Unsupported discount type.",
         )
         nonnegative_decimal(self.value, "coupon value", "INVALID_COUPON")
-        require(
-            0 < self.value <= 100, "INVALID_COUPON", "Percentage must be above 0 and at most 100."
-        )
+        require(self.value > 0, "INVALID_COUPON", "Discount must be positive.")
+        if self.discount_type == DiscountType.PERCENTAGE:
+            require(self.value <= 100, "INVALID_COUPON", "Percentage must be at most 100.")
+        else:
+            money(self.value, "flat discount")
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,10 +296,33 @@ class BookingTerms:
     rate_card: RateCard
     coupon_terms: CouponTerms | None = None
     coupon_code: str | None = None
+    surge_multiplier: Decimal = Decimal("1")
+    cancellation_terms: CancellationTerms = field(default_factory=CancellationTerms)
+    allowed_assignment_types: tuple[CarType, ...] | None = None
 
     def __post_init__(self) -> None:
         require(
             isinstance(self.rate_card, RateCard), "INVALID_RATE_CARD", "A rate card is required."
+        )
+        nonnegative_decimal(self.surge_multiplier, "surge multiplier", "INVALID_SURGE")
+        require(self.surge_multiplier >= 1, "INVALID_SURGE", "Surge cannot be below one.")
+        require(
+            isinstance(self.cancellation_terms, CancellationTerms),
+            "INVALID_CANCELLATION",
+            "Cancellation terms are required.",
+        )
+        if self.allowed_assignment_types is None:
+            object.__setattr__(
+                self, "allowed_assignment_types", UpgradeRules().types_for(self.rate_card.car_type)
+            )
+        require(
+            isinstance(self.allowed_assignment_types, tuple)
+            and bool(self.allowed_assignment_types)
+            and self.allowed_assignment_types[0] == self.rate_card.car_type
+            and all(isinstance(kind, CarType) for kind in self.allowed_assignment_types)
+            and len(set(self.allowed_assignment_types)) == len(self.allowed_assignment_types),
+            "INVALID_UPGRADES",
+            "Invalid captured assignment types.",
         )
         require(
             (self.coupon_terms is None) == (self.coupon_code is None),
@@ -255,12 +350,23 @@ class FareBreakdown:
     minimum_fare_adjustment: Decimal
     discount: Decimal
     total: Decimal
+    surge_adjustment: Decimal = Decimal("0.00")
 
     def __post_init__(self) -> None:
-        for field in ("distance_charge", "minimum_fare_adjustment", "discount", "total"):
+        for field in (
+            "distance_charge",
+            "minimum_fare_adjustment",
+            "surge_adjustment",
+            "discount",
+            "total",
+        ):
             money(getattr(self, field), field)
         require(
-            self.distance_charge + self.minimum_fare_adjustment - self.discount == self.total,
+            self.distance_charge
+            + self.minimum_fare_adjustment
+            + self.surge_adjustment
+            - self.discount
+            == self.total,
             "INVALID_AMOUNT",
             "Receipt components do not reconcile.",
         )
@@ -283,6 +389,7 @@ class Ride:
     completed_at: datetime | None = None
     distance_km: Decimal | None = None
     receipt: FareBreakdown | None = None
+    cancellation: CancellationDetails | None = None
 
     def __post_init__(self) -> None:
         for field in ("id", "user_id", "driver_id"):
@@ -292,15 +399,14 @@ class Ride:
             "INVALID_CAR_TYPE",
             "Unsupported car type.",
         )
-        require(
-            self.requested_type == self.assigned_type
-            or (self.requested_type == CarType.HATCHBACK and self.assigned_type == CarType.SEDAN),
-            "INVALID_RIDE_STATE",
-            "Only Hatchback-to-Sedan upgrades are supported.",
-        )
         require(isinstance(self.pickup, Location), "INVALID_LOCATION", "Pickup is required.")
         require(
             isinstance(self.terms, BookingTerms), "INVALID_RATE_CARD", "Booking terms required."
+        )
+        require(
+            self.assigned_type in self.terms.allowed_assignment_types,
+            "INVALID_RIDE_STATE",
+            "Assignment is not permitted by captured upgrade rules.",
         )
         require(
             self.terms.rate_card.car_type == self.requested_type,
@@ -316,7 +422,7 @@ class Ride:
                 "INVALID_RIDE_STATE",
                 "Ongoing rides cannot contain completion fields.",
             )
-        else:
+        elif self.status == RideStatus.COMPLETED:
             require(
                 all(item is not None for item in completion),
                 "INVALID_RIDE_STATE",
@@ -331,6 +437,33 @@ class Ride:
             )
             nonnegative_decimal(self.distance_km, "distance_km", "INVALID_DISTANCE")
             require(isinstance(self.receipt, FareBreakdown), "INVALID_AMOUNT", "Receipt required.")
+
+        if self.status == RideStatus.CANCELLED:
+            require(
+                all(item is None for item in completion)
+                and isinstance(self.cancellation, CancellationDetails),
+                "INVALID_RIDE_STATE",
+                "Cancelled rides require only cancellation details.",
+            )
+            require(
+                self.cancellation.cancelled_at >= self.started_at,
+                "INVALID_RIDE_STATE",
+                "Cancellation cannot precede booking.",
+            )
+        else:
+            require(
+                self.cancellation is None,
+                "INVALID_RIDE_STATE",
+                "Only cancelled rides can contain cancellation details.",
+            )
+
+    def cancel(self, details: CancellationDetails) -> Self:
+        require(
+            self.status == RideStatus.ONGOING,
+            "INVALID_RIDE_STATE",
+            "Only ongoing rides can be cancelled.",
+        )
+        return replace(self, status=RideStatus.CANCELLED, cancellation=details)
 
     @property
     def is_upgrade(self) -> bool:
