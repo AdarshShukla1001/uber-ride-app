@@ -4,7 +4,8 @@ Money and billed distance use Decimal. Coordinates use floats for geographic mat
 No domain model depends on HTTP, CLI parsing, or a particular storage adapter.
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -30,7 +31,7 @@ class CarType(StrEnum):
 
 
 class RideStatus(StrEnum):
-    """Booking starts a ride; completion ends it."""
+    """Booking starts a ride; completion and cancellation are terminal states."""
 
     ONGOING = "ongoing"
     COMPLETED = "completed"
@@ -38,7 +39,7 @@ class RideStatus(StrEnum):
 
 
 class DiscountType(StrEnum):
-    """Only expose discount kinds supported by the initial release."""
+    """Supported discount kinds; each has validation and calculation behavior."""
 
     PERCENTAGE = "percentage"
     FLAT = "flat"
@@ -57,7 +58,13 @@ class UpgradeRules:
     def __post_init__(self) -> None:
         require(isinstance(self.routes, tuple), "INVALID_UPGRADES", "Routes must be immutable.")
         seen = set()
-        for requested, allowed in self.routes:
+        for route in self.routes:
+            require(
+                isinstance(route, tuple) and len(route) == 2,
+                "INVALID_UPGRADES",
+                "Each route must be an immutable pair.",
+            )
+            requested, allowed = route
             require(
                 isinstance(requested, CarType) and requested not in seen,
                 "INVALID_UPGRADES",
@@ -297,7 +304,7 @@ class BookingTerms:
     coupon_terms: CouponTerms | None = None
     coupon_code: str | None = None
     surge_multiplier: Decimal = Decimal("1")
-    cancellation_terms: CancellationTerms = field(default_factory=CancellationTerms)
+    cancellation_terms: CancellationTerms = dataclass_field(default_factory=CancellationTerms)
     allowed_assignment_types: tuple[CarType, ...] | None = None
 
     def __post_init__(self) -> None:

@@ -53,6 +53,7 @@ def test_api_upgrade_coupon_completion_and_histories(app):
         assert receipt == {
             "distance_charge": "69.00",
             "minimum_fare_adjustment": "0.00",
+            "surge_adjustment": "0.00",
             "discount": "6.90",
             "total": "62.10",
         }

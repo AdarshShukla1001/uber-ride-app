@@ -1,6 +1,6 @@
 # Ride Hailing Backend — Product Requirements
 
-Status: mandatory behavior implemented through CLI and API; automated acceptance tests and deterministic demo available. Optional bonus features remain deferred as described below.
+Status: mandatory behavior and all four bonuses implemented through the shared CLI/API core. Configurable rates/upgrades, SUV, and flat coupons are supported. See section 10 for extension behavior.
 
 ## 1. Purpose and source
 
@@ -41,7 +41,7 @@ Source: `/Users/adarshshukla/Downloads/coding_assignment_round_2.pdf` (three pag
 
 ### Bonus or deferred scope
 
-The assignment lists surge pricing, configurable matching, cancellation fees, and concurrency safety as bonuses. Provide nearest-driver matching behind a focused strategy contract and a simple in-process mutation boundary, but prioritize mandatory behavior. Additional matching implementations, surge, and cancellation are deferred. CLI remote mode is optional after both required interfaces are complete.
+The user authorized bonus implementation. Surge pricing, nearest/highest-rated matching, cancellation fees, and in-process concurrency safety are implemented. CLI remote mode remains optional. Configuration and extension semantics are specified in section 10.
 
 ### Out of scope
 
@@ -61,8 +61,8 @@ These decisions resolve details absent from the assignment and must appear in th
 | Decimal limits | Arithmetic uses Python Decimal's default precision; amounts outside supported precision are rejected. |
 | Matching distance | Haversine distance in kilometers. |
 | Search radius | Application configuration, default 5 km; boundary inclusive. This default is an assumption. |
-| Matching order | Eligible requested-type drivers first; nearest distance, then stable driver ID for ties. |
-| Upgrade | Hatchback may fall back to Sedan within the same radius; Sedan never falls back to Hatchback. |
+| Matching order | Eligible requested-type drivers first; nearest distance by default, or configured highest rating; deterministic ties. |
+| Upgrade | Ordered configurable routes within the same radius; defaults allow Hatchback to Sedan only. |
 | Trip distance | Completion supplies a finite, nonnegative distance in kilometers. It is trusted exercise input, independent of straight-line matching distance. |
 | Completion location | Completion supplies the drop-off coordinates; update the cab location there. |
 | Minimum fare | A pre-discount fare floor, not an additive base charge. |
@@ -84,8 +84,9 @@ Rate cards are configuration data. Use these proposed initial values; only the H
 | --- | ---: | ---: | ---: | ---: |
 | Hatchback | INR 50 | INR 10/km | INR 8/km | INR 5/km |
 | Sedan | INR 70 | INR 14/km | INR 11/km | INR 8/km |
+| SUV | INR 100 | INR 20/km | INR 16/km | INR 12/km |
 
-The Sedan values and attribution of the sample rates to Hatchback are proposed assumptions.
+The Sedan/SUV values and attribution of the sample rates to Hatchback are proposed assumptions.
 
 Tiers are cumulative marginal charges. Fractional distances are prorated; there are no gaps between 2 and 3 km or between 5 and 6 km.
 
@@ -95,14 +96,15 @@ For Hatchback distance `d`:
 distance_charge = 10 * min(d, 2)
                 + 8 * min(max(d - 2, 0), 3)
                 + 5 * max(d - 5, 0)
-subtotal = max(minimum_fare, distance_charge)
+base = max(minimum_fare, distance_charge)
+subtotal = round_money(base * captured_surge_multiplier)
 discount = min(subtotal, coupon_discount(subtotal))
 total = subtotal - discount
 ```
 
-Use decimal arithmetic. Round the aggregate distance charge to two decimal places using ROUND_HALF_UP, apply the minimum, round the coupon discount to two decimal places, cap it at the subtotal, then subtract. The receipt must reconcile exactly: distance charge + minimum adjustment - discount = total.
+Use decimal arithmetic. Round the aggregate distance charge to two decimal places using ROUND_HALF_UP, apply the minimum, multiply by captured surge and round to two decimals, round the coupon discount to two decimal places, cap it at the subtotal, then subtract. The receipt must reconcile exactly: distance charge + minimum adjustment + surge adjustment - discount = total.
 
-Initial coupon creation supports percentage discounts strictly greater than 0 and at most 100. Represent discount terms so flat discounts can be added as a localized extension; do not advertise flat coupons until implemented and tested.
+Coupon creation supports percentages strictly greater than 0 and at most 100, and positive flat amounts with whole-paise precision. Both are capped at the post-surge subtotal.
 
 Always use the requested car type's snapshotted rate card, including free upgrades. Coupons can reduce the payable fare below the pre-discount minimum, but never below zero.
 
@@ -148,7 +150,7 @@ Always use the requested car type's snapshotted rate card, including free upgrad
 
 ### Coupons
 
-- Add a valid percentage coupon; reject empty codes, duplicates, and invalid percentages.
+- Add a valid percentage or flat coupon; reject empty codes, duplicates, and invalid terms.
 - Delete an existing coupon by deactivation; repeated deletion is successful, unknown code is not-found.
 - Missing, deleted, or invalid coupons cause booking failure when explicitly supplied.
 - Deletion after booking does not invalidate captured terms.
@@ -161,6 +163,7 @@ Always use the requested car type's snapshotted rate card, including free upgrad
 | Register driver | `driver register` | `POST /drivers` |
 | Update location | `driver location` | `PATCH /drivers/{id}/location` |
 | Book ride | `ride book` | `POST /rides` |
+| Cancel ride | `ride cancel` | `POST /rides/{id}/cancel` |
 | Complete ride | `ride end` | `POST /rides/{id}/complete` |
 | View ride | `ride show` | `GET /rides/{id}` |
 | User history | `user rides` | `GET /users/{id}/rides` |
@@ -204,3 +207,20 @@ The assignment demo allocates 8 minutes to behavior, 8 minutes to design, 10 min
 The schedule is a target, not a reason to skip mandatory behavior or tests. Defer optional features first. Definition of done: mandatory acceptance criteria pass, both interfaces run using documented commands, tests pass, no placeholder business behavior remains, and README covers assumptions, trade-offs, future improvements, and truthful AI usage. Make incremental meaningful commits during implementation when authorized by the implementation task.
 
 See [backendrules.md](backendrules.md) for engineering constraints and class diagrams.
+
+
+## 10. Implemented extensions and explicit assumptions
+
+This section extends the baseline two-category, percentage-only scope above. User authorization covers the four assignment bonuses plus customization support.
+
+- TOML startup configuration selects matching, surge, cancellation, radius, full per-category rate overrides and ordered assignment routes. Defaults preserve original pricing and matching. Unknown fields and invalid values fail startup. No hot reload; restarting clears in-memory state.
+- Car types include SUV at assumed rates 100 minimum / 20, 16, 12 per km. Default SUV requests match SUV only; Hatchback still falls back only to Sedan. Additional fallback routes require explicit configuration. Assignment permissions are captured alongside requested-type rates, so entity validation does not duplicate fixed category pairs.
+- Driver ratings are optional trusted registration inputs in [0, 5], not a customer-rating subsystem. Highest-rated ranking prefers rated candidates, descending rating, then nearest distance, then ID. Eligibility and fallback precedence still apply before ranking.
+- Surge is disabled by default. The local provider counts ongoing same-requested-type rides with pickups within the search radius plus this request, and compatible available drivers within that radius. It is an active-ride demand proxy. Compute `min(maximum, 1 + max(0, demand/max(1,supply)-1)*sensitivity)` before reservation, with default maximum 3 and sensitivity 0.5. Policy limits are maximum 1–100 and sensitivity 0–100. A zero-supply quote never overrides matching failure. Capture the multiplier at booking. Minimum is applied before surge; coupons are applied after surge; free upgrades still use requested-type rates.
+- Flat coupons are positive whole-paise amounts, capped at the surged subtotal. Existing percentage API/CLI inputs remain accepted. Explicit HTTP discount_type/value must not be combined with legacy percentage.
+- Cancellation transitions ONGOING to CANCELLED. Since booking starts the ride immediately, the grace clock starts at booking; there is no separate dispatch/arrival lifecycle. Default is free through exactly 120 seconds, INR 20 afterwards. Configurable free policy records zero fee terms. No coupon/surge adjustment or distance fare applies on cancellation; it records a fee without collecting payment.
+- Cancellation has its own timestamp, fee and reason, no completion receipt/distance/drop-off. Keep latest cab location. Release the exact ride assignment once. A repeat returns the saved cancellation even after driver reuse. Reject completion of cancelled rides and cancellation of completed rides. All histories include cancelled rides.
+- Rates, coupons, surge multiplier, cancellation terms and ordered allowed types are immutable booking snapshots. Policy implementations are fixed for an application lifetime; policy hot swapping is unsupported.
+- All mutation flows share the existing lock. Tests cover concurrent bookings, cancellation/completion contention and duplicate cancellations. No cross-process or durable transaction guarantee is claimed.
+
+See `docs/customization.md` for extension recipes and the SOLID responsibility map; `config/example.toml` is an executable example.

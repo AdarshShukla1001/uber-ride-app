@@ -1,6 +1,6 @@
 # Backend Engineering Rules — Python Ride Hailing
 
-Status: mandatory backend behavior implemented with automated tests; these rules govern further changes.
+Status: mandatory behavior and bonus policies implemented with automated tests; these rules govern further changes.
 
 ## 1. Scope and precedence
 
@@ -56,6 +56,7 @@ classDiagram
         +str name
     }
     class Driver {
+        +Optional rating
         +str id
         +str name
         +Cab cab
@@ -88,11 +89,16 @@ classDiagram
         +Optional distance_km
         +BookingTerms terms
         +Optional receipt
+        +Optional cancellation
         +complete(distance, dropoff, receipt, time)
+        +cancel(details)
     }
     class BookingTerms {
         +RateCard rate_card
         +Optional coupon_terms
+        +surge_multiplier
+        +cancellation_terms
+        +allowed_assignment_types
     }
     class RateCard {
         +str version
@@ -117,6 +123,7 @@ classDiagram
     class FareBreakdown {
         +Decimal distance_charge
         +Decimal minimum_fare_adjustment
+        +Decimal surge_adjustment
         +Decimal discount
         +Decimal total
     }
@@ -132,7 +139,7 @@ classDiagram
     Coupon *-- CouponTerms
 ```
 
-Enums: `CarType = HATCHBACK | SEDAN`; `RideStatus = ONGOING | COMPLETED`; initial `DiscountType = PERCENTAGE`. Add FLAT only with its implementation and tests. No unused cancellation states.
+Enums: `CarType = HATCHBACK | SEDAN | SUV`; `RideStatus = ONGOING | COMPLETED | CANCELLED`; `DiscountType = PERCENTAGE | FLAT`. Each value has implemented behavior and tests.
 
 Use frozen dataclasses and immutable nested collections for Location, RateCard, PricingTier, CouponTerms, BookingTerms, and FareBreakdown. Frozen outer objects containing mutable lists are not sufficient snapshots. User, Driver, Cab, Coupon, and Ride are also immutable: lifecycle operations return validated replacements, staged before repository writes. Diagram transition methods describe responsibilities; they need not mutate objects. Optional fields must agree with ride status: completed rides require distance, drop-off, completion time, and receipt. Model invariant checks are implemented alongside the corresponding use cases.
 
@@ -148,6 +155,7 @@ classDiagram
     class RideService {
         +book_ride(command)
         +complete_ride(command)
+        +cancel_ride(command)
         +get_ride(ride_id)
         +get_user_history(user_id)
         +get_driver_history(driver_id)
@@ -209,6 +217,15 @@ classDiagram
     RideService --> CouponRepository
     RideService --> DriverMatcher
     RideService --> PricingEngine
+    RideService --> SurgePolicy
+    RideService --> CancellationFeePolicy
+    RideService --> MarketConditionsProvider
+    DriverMatcher --> UpgradeRules
+    HighestRatedDriverStrategy ..|> MatchingStrategy
+    DemandSupplySurgePolicy ..|> SurgePolicy
+    NoSurgePolicy ..|> SurgePolicy
+    GracePeriodCancellationPolicy ..|> CancellationFeePolicy
+    FreeCancellationPolicy ..|> CancellationFeePolicy
     RideService --> RateCardCatalog
     RideService --> MutationGuard
     CouponService --> CouponRepository
@@ -237,16 +254,16 @@ Booking sequence inside the shared mutation boundary:
 
 1. Validate user existence, active-ride restriction, request values, and coupon.
 2. Load available drivers and filter by inclusive radius.
-3. Form the requested-type candidate set.
-4. Only for an empty Hatchback set, form the Sedan fallback set.
-5. Rank the selected set by distance, then stable driver ID.
-6. Retrieve and snapshot the requested-type rate card and coupon terms.
+3. Iterate ordered configured assignment types, exact requested type first.
+4. Select the first nonempty eligible candidate set; default Hatchback fallback is Sedan.
+5. Rank with the configured nearest/highest-rated strategy.
+6. Retrieve and snapshot requested-type rates, coupon, pre-reservation surge, cancellation terms and allowed types.
 7. Construct the new ride and updated driver state before modifying storage.
 8. Commit both records together and return a detached result.
 
 Eligibility and fallback belong to DriverMatcher; MatchingStrategy ranks eligible candidates only. Do not let a strategy bypass car-type or radius rules.
 
-Use one shared RLock rather than a different lock per service or request. Location updates, coupon mutations, booking, and completion participate in the same boundary. A lock prevents races but does not supply rollback. Stage replacements and make the in-memory commit block free of fallible business validation; if storage gains fallible writes, add an actual transaction/rollback mechanism. Do not claim crash durability or cross-process safety.
+Use one shared RLock rather than a different lock per service or request. Location updates, coupon mutations, booking, completion, and cancellation participate in the same boundary. A lock prevents races but does not supply rollback. Stage replacements and make the in-memory commit block free of fallible business validation; if storage gains fallible writes, add an actual transaction/rollback mechanism. Do not claim crash durability or cross-process safety.
 
 Completion validates inputs, returns a stored receipt for completed rides, calculates from snapshots, stages completed ride and released driver, then commits. Invalid completion cannot release a driver. Repeated completion cannot move a driver who has since started another ride.
 
@@ -330,7 +347,7 @@ Run appropriate tests during implementation and the full suite before delivery. 
 
 - New car type: add enum/configuration and explicit matching policy if needed; no duplicated pricing engine.
 - New tier: update rate data and boundary tests; do not edit booking orchestration.
-- Flat discount: add a supported discount kind, calculation branch or strategy, input validation, and tests; no ride lifecycle rewrite.
+- New discount kind: follow percentage/flat validation and calculation boundaries, update input validation and tests; no ride lifecycle rewrite.
 - New matching strategy: implement the existing ranking contract; preserve eligibility/fallback rules.
 - Persistence: implement repository adapters and a transactional mutation boundary; do not assume dictionary locking transfers to a database.
 - Avoid dead code, unused states, speculative factories, generic CRUD frameworks, and vehicle subclass hierarchies for data-only differences.
@@ -338,4 +355,17 @@ Run appropriate tests during implementation and the full suite before delivery. 
 - Review AI-generated code for incorrect rounding, mutable snapshots, partial mutations, redundant abstractions, and missing edge cases.
 - Keep the README's AI usage note factual: what was requested, accepted, corrected, or rejected and why.
 
-The user authorized sequential implementation of the mandatory scope. Keep the PRD, diagrams, tests, and implementation consistent as behavior evolves; do not introduce placeholder success responses.
+The user authorized implementation of the mandatory scope, then the bonuses and customization work. Keep the PRD, diagrams, tests, and implementation consistent as behavior evolves; do not introduce placeholder success responses.
+
+
+## 13. Bonus policy boundaries
+
+`domain/policies.py` defines pure SurgePolicy and CancellationFeePolicy contracts and concrete alternatives. `application/ports.py` defines MarketConditionsProvider; `infrastructure/market.py` implements the local proxy using repositories under the caller's guard. `bootstrap.py` is the only selection/wiring point. No framework imports enter the domain.
+
+`UpgradeRules` owns ordered assignment compatibility. DriverMatcher filters availability/radius, selects the first nonempty compatible category, then delegates ranking. BookingTerms snapshots allowed types, and Ride checks the assigned type against that snapshot. Do not reintroduce hardcoded Hatchback/Sedan branches in entities.
+
+Cancellation is another RideService workflow, using the same shared guard. Stage validated CancellationDetails, cancelled ride and released driver before writes. Never change cab location when cancelling. Repeat calls return before touching the driver. Keep completion and cancellation data mutually exclusive.
+
+Pricing stays a small pure calculation: marginal distance, minimum, surge, coupon. A branch for two discount kinds is intentional; introduce a discount strategy only when materially different rules justify it. Do not create vehicle subclasses for rate-only differences.
+
+Configuration is immutable and startup-only. The TOML loader rejects unknown keys and builds validated domain records. Transport additions preserve old percentage inputs and expose new captured terms/terminal state. Read `docs/customization.md` for the current SOLID and extension map.

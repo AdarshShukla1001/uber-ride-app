@@ -25,7 +25,11 @@ def main(argv: list[str] | None = None) -> int:
         application = None
         if args.mode in {"cli", "serve"}:
             if args.config:
-                settings, cards = load_configuration(args.config)
+                try:
+                    settings, cards = load_configuration(args.config)
+                except (OSError, ValueError) as exc:
+                    print(f"CONFIGURATION_ERROR: {exc}", file=sys.stderr)
+                    return 2
                 application = create_application(settings, rate_cards=cards)
             else:
                 application = create_application()
@@ -47,9 +51,6 @@ def main(argv: list[str] | None = None) -> int:
         return run_demo()
     except DomainError as exc:
         print(f"{exc.code}: {exc.message}", file=sys.stderr)
-        return 2
-    except (OSError, ValueError) as exc:
-        print(f"CONFIGURATION_ERROR: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130

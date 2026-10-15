@@ -14,7 +14,7 @@ from ride_app.domain.policies import DemandSupplySurgePolicy
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Application-wide matching configuration, independent of a customer's request."""
+    """Validated startup policy selections and immutable business configuration."""
 
     search_radius_km: float = 5.0
     matching_strategy: str = "nearest"
@@ -55,7 +55,7 @@ class Settings:
 
 
 class ConfiguredRateCardCatalog:
-    """Exercise rate cards; Sedan rates are explicit assumptions recorded in the PRD."""
+    """Exercise rate cards; Sedan and SUV rates are disclosed assumptions."""
 
     def __init__(self, cards: Mapping[CarType, RateCard] | None = None) -> None:
         # Read-only mapping plus frozen records prevents changing captured rate terms.

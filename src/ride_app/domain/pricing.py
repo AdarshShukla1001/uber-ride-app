@@ -1,4 +1,4 @@
-"""Pure fare calculation: marginal tiers, pre-discount minimum, then coupon."""
+"""Pure fare calculation: marginal tiers, minimum, captured surge, then coupon."""
 
 from decimal import ROUND_HALF_UP, Decimal, DecimalException
 
@@ -33,7 +33,7 @@ def calculate_distance_charge(distance_km: Decimal, rate_card: RateCard) -> Deci
 
 
 def calculate_discount(subtotal: Decimal, terms: CouponTerms | None) -> Decimal:
-    """Apply percentage to the minimum-adjusted subtotal and cap at that subtotal."""
+    """Apply percentage or flat discount to the surged subtotal, capped at that subtotal."""
     nonnegative_decimal(subtotal, "subtotal")
     if terms is None:
         return Decimal("0.00")
