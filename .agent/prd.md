@@ -1,6 +1,6 @@
 # Ride Hailing Backend — Product Requirements
 
-Status: planning baseline; implementation has not started.
+Status: approved planning baseline; project scaffold initialization authorized. Business workflows remain pending implementation.
 
 ## 1. Purpose and source
 
