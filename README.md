@@ -62,53 +62,70 @@ Use the schemas in `/docs` for request bodies. For example, coupon creation acce
 
 Errors use `{"error":{"code":"...","message":"..."}}`, with field details for malformed input. Unknown entities return 404, assignment/duplicate conflicts and no driver return 409, and invalid inputs/coupons return 422.
 
-## Design and assumptions
+## Assumptions
 
-- Immutable domain records enforce validation and return replacements for transitions. Services stage all fallible validation before storing related ride/driver changes under a shared lock. In-memory writes have no external IO; this is not a rollback transaction or crash-durable store.
-- Domain policies do not import FastAPI or Pydantic. Repository protocols allow storage substitution. HTTP output schemas and CLI rendering remain adapter concerns.
-- One cab per driver. Booking immediately starts a ride. Each user and driver can have at most one ongoing ride. Availability derives from assignment. Cancellation releases both and appears in histories.
-- Matching uses Haversine distance with an inclusive configurable 5 km default radius. Requested type takes priority, then Hatchback-to-Sedan fallback. Ranking defaults to nearest driver, then stable ID; highest-rated ranking is selectable through configuration. Ordered upgrade routes are configurable, with requested-type billing preserved.
-- Billing follows requested type, including upgrades. Immutable rates, coupons, surge multiplier, cancellation terms, and allowed assignment types are captured at booking; later data changes do not reprice the trip.
-- Completion uses supplied, trusted trip distance; GPS updates do not determine billed distance. Completion updates the cab to drop-off and releases its assignment. Valid repeat completion returns the stored result without changing driver state.
-- Names are trimmed; coupon codes and cab registration numbers are trimmed and uppercased. Deleted coupon codes remain reserved. Coupons are percentages above 0 and at most 100 or positive flat amounts in whole paise, one per ride, with no expiry or usage limit.
+- **Fleet and Driver Model:** One cab per driver. Driver availability is derived strictly from assignment (`active_ride_id is None`) rather than a mutable status flag. Each rider and driver can participate in at most one ongoing ride at any time.
+- **Geographic Model:** Matching uses great-circle Haversine distance with an inclusive configurable radius (default 5 km). Geographic coordinates are validated within $[-90, 90]$ latitude and $[-180, 180]$ longitude using finite floating-point numbers.
+- **Trusted Trip Distance:** Trip billing uses the distance reported at completion; GPS coordinates do not calculate billed distance, but update the driver's cab location upon drop-off.
+- **Pricing Schedule & Rate Cards:** The problem statement provided a single tiered example (Min ₹50, 0–2 km @ ₹10/km, 3–5 km @ ₹8/km, 6+ km @ ₹5/km). We interpreted this as the Hatchback schedule and established an explicit, higher tier schedule for Sedan (Min ₹70, 0–2 km @ ₹14/km, 2–5 km @ ₹11/km, 5+ km @ ₹8/km) and SUV (Min ₹100, 0–2 km @ ₹20/km, 2–5 km @ ₹16/km, 5+ km @ ₹12/km). Tiers are marginal and prorated continuously.
+- **Free Upgrade Guarantee:** If a requested vehicle class (e.g., Hatchback) has no available drivers within the radius, the system searches the upgrade route (Hatchback $\to$ Sedan $\to$ SUV). Upgraded trips are billed strictly using the *requested* car type's rate card.
+- **Coupon Lifecycle:** Coupon codes are normalized to uppercase. Deleted coupons are soft-deactivated (`active=False`) so that codes remain reserved and cannot be recreated with altered terms. A booking captures an immutable snapshot of coupon terms; subsequent coupon deletion never retroactively changes in-flight or completed fares.
+- **Financial Precision:** All money amounts and billed trip distances use Python's `Decimal` with explicit `ROUND_HALF_UP` to the nearest paise (`Decimal("0.01")`). Binary floating-point money is strictly forbidden.
+- **In-Memory Storage Scope:** Per the exercise specification, storage is in-memory dictionaries. Process isolation means standalone CLI and API processes hold independent state, and Uvicorn runs with a single worker.
 
 | Rate card | Minimum | First 2 km | Above 2–5 km | Above 5 km |
 | --- | ---: | ---: | ---: | ---: |
-| Hatchback | INR 50 | INR 10/km | INR 8/km | INR 5/km |
-| Sedan | INR 70 | INR 14/km | INR 11/km | INR 8/km |
-| SUV | INR 100 | INR 20/km | INR 16/km | INR 12/km |
+| Hatchback | INR 50.00 | INR 10.00/km | INR 8.00/km | INR 5.00/km |
+| Sedan | INR 70.00 | INR 14.00/km | INR 11.00/km | INR 8.00/km |
+| SUV | INR 100.00 | INR 20.00/km | INR 16.00/km | INR 12.00/km |
 
-These are disclosed exercise assumptions: the source provides one example schedule, not separate car-type schedules. Tiers are marginal and fractional distances are prorated. Round the combined distance charge with ROUND_HALF_UP, apply the minimum, multiply by captured surge and round, round and cap the coupon discount, then subtract. Coupons may reduce fare below the minimum, never below zero. Arithmetic uses Decimal's default precision; unsupported magnitudes are rejected.
+## Key Design Decisions and Trade-offs
 
-The full product contract is in [.agent/prd.md](.agent/prd.md); architecture and class diagrams are in [.agent/backendrules.md](.agent/backendrules.md).
+1. **Hexagonal Architecture (Ports & Adapters) with Zero-Dependency Domain:**
+   - *Decision:* The domain core (`models.py`, `pricing.py`, `matching.py`, `policies.py`) has zero imports from FastAPI, Pydantic, or storage libraries. Use cases are orchestrated in application services behind structural Protocols (`ports.py`).
+   - *Trade-off:* Requires explicit mapping between HTTP schemas, application commands, and domain entities. This adds slight boilerplate but guarantees complete decoupling: CLI and API share identical business rules, and swapping storage requires zero domain changes.
+2. **Immutable Domain Entities (`dataclass(frozen=True, slots=True)`):**
+   - *Decision:* All domain records (`User`, `Driver`, `Cab`, `Ride`, `BookingTerms`, `FareBreakdown`) are immutable. State transitions return fresh copies via `replace()`.
+   - *Trade-off:* Slightly higher memory churn during transitions, but completely eliminates side-effect bugs and race conditions where partially mutated objects leak during failed operations.
+3. **Staged Mutations under a Single Reentrant Lock (`InProcessMutationGuard`):**
+   - *Decision:* All state-changing operations across multi-entity boundaries (Driver + Ride + Coupon) synchronize on a single `threading.RLock()`. All fallible business validations run *before* repository writes.
+   - *Trade-off:* Limits write throughput to a single CPU core, which is intentional and optimal for an interview machine-coding scope. It avoids deadlock hazards and multi-lock race conditions.
+4. **Snapshotting Pattern for Financial Contracts (`BookingTerms`):**
+   - *Decision:* Rate card tiers, coupon terms, surge multiplier, cancellation terms, and upgrade permissions are snapshotted on the `Ride` at booking time.
+   - *Trade-off:* Stores duplicate data per ride record rather than referencing catalog IDs, but provides total isolation against configuration updates, coupon deletion, or dynamic surge fluctuations while a ride is in progress.
+5. **Idempotent Completion and Cancellation:**
+   - *Decision:* Repeated completion or cancellation requests return the existing saved record immediately.
+   - *Trade-off:* Requires terminal status checks at the use-case boundary, but guarantees safety against network retries: a completed ride will never re-release or relocate a driver who may have already taken a subsequent trip.
 
-## Configuration and bonus behavior
+## What We Would Do Differently with More Time
 
-Start with defaults (nearest matching, no surge) or use the annotated example:
+1. **Distributed Spatial Indexing (Uber H3 / S2 Geometry):**
+   - Currently, driver discovery uses a linear Haversine scan $O(N)$ over all available drivers. In production, driver GPS pings would update an H3 hexagonal spatial index (or Redis GEO / PostGIS), enabling $O(1)$ radius lookups by querying neighboring hexagon rings.
+2. **Crash-Durable Persistence & Transactional Boundaries:**
+   - Replace in-memory dictionaries with PostgreSQL/CockroachDB. Replace `InProcessMutationGuard` with database-level isolation (`SELECT ... FOR UPDATE` or optimistic locking with record versions) to support multi-worker, horizontally scaled API instances.
+3. **Real-Time Request Telemetry for Dynamic Surge:**
+   - Our surge implementation calculates demand using active nearby rides as a proxy. In production, an asynchronous event pipeline (Kafka/Flink) would track unfulfilled ride requests, app opens, and ETA elasticity to produce predictive surge grids.
+4. **Authentication, Driver Payouts & Webhook Ingestion:**
+   - Implement JWT-based RBAC (Riders vs Drivers vs Admins), automated driver payout ledger accounting, and external payment gateway webhooks (Stripe/Razorpay) for live ride settlement and cancellation fees.
+5. **Live Turn-by-Turn GPS Telemetry & OSRM Routing:**
+   - Replace user-supplied trusted distance with real-time waypoint streaming and road-network distance calculation (e.g., OSRM/Valhalla) rather than Euclidean/Haversine estimates.
 
-```bash
-.venv/bin/python -m ride_app cli --config config/example.toml
-.venv/bin/python -m ride_app serve --config config/example.toml
-```
+## AI Collaboration and Ground Rules Reflection
 
-The example enables highest-rated matching, demand/supply surge, SUV fallbacks and a fourth Hatchback tier. Configuration is validated once at startup; changes require a restart, which also clears this in-memory application's data. Unknown fields and invalid policy names fail startup. [Customization guide](docs/customization.md) maps each change to configuration, a policy, or a domain change and explains SOLID.
-
-- **Surge:** local demand is nearby ongoing rides of the requested type plus the incoming request; supply is compatible available cabs within the search radius. This is an exercise proxy for demand, not real request telemetry. Multiplier = `min(maximum, 1 + max(0, demand / max(1, supply) - 1) * sensitivity)`, captured before assignment. No available driver still means no booking.
-- **Matching:** highest-rated considers eligible requested-type candidates first, then configured fallback types. Rated drivers precede unrated drivers; ties use distance then ID. Ratings are optional decimals from 0 to 5.
-- **Cancellation:** booking starts a ride immediately. Ongoing rides may be cancelled free through 120 seconds, then INR 20 by default. Grace period/fee and free policy are configurable. Cancellation retains the latest cab location, records a separate fee, and releases the assignment once. Coupons and surge do not affect cancellation fees. Completed rides cannot be cancelled; cancelled rides cannot be completed. Repeated cancellation returns the saved result.
-- **Concurrency:** one shared lock protects booking, completion, cancellation and related changes. This guarantee applies to one application context in one process.
-
-Additional CLI examples:
-
-```text
-driver register --name Sam --registration-number KA02 --type suv --rating 4.8 --lat 0 --lng 0
-coupon add --code FLAT20 --flat 20
-ride cancel --ride RIDE_ID --reason "Plans changed"
-```
-
-The API accepts `{"code":"FLAT20","discount_type":"flat","value":"20"}` and continues to accept legacy `{"code":"SAVE10","percentage":"10"}`. Do not combine formats. Cancellation accepts `POST /rides/{id}/cancel` with `{}` or `{"reason":"Plans changed"}`. Responses add rating, captured terms, `surge_adjustment`, and optional `cancellation` details; `cancelled` is a new terminal status.
+- **What was prompted for:**
+  - Generating initial boilerplate for pure mathematical formulas (Haversine great-circle distance).
+  - Drafting initial Pydantic HTTP schema definitions and argparse CLI subparser structure.
+  - Generating comprehensive tabular test fixtures for raw tier boundaries, edge distances, and floating-point money traps.
+- **What was critically reviewed, rejected, or rewritten:**
+  - *Rejected Compounding Tier Rounding:* Initial AI suggestions rounded intermediate distance charges at each tier boundary. This was rejected because rounding before summing compounds fractional errors. We rewrote it to sum unrounded marginal segments and apply `ROUND_HALF_UP` exactly once.
+  - *Rejected Mutable Entity Lifecycles:* The AI initially generated mutable OOP classes with in-place mutation methods (e.g. `driver.status = 'busy'`). This was rewritten to immutable frozen dataclasses returning new instances via `replace()` to ensure atomicity.
+  - *Rejected Shared/Live Catalog Lookups at Completion:* AI proposed querying the coupon and rate-card catalogs during `complete_ride`. We rejected this design and introduced `BookingTerms` snapshots to eliminate temporal coupling when coupons are deleted midway through a trip.
+  - *Rejected Fragmented Multi-Locking:* AI suggested separate threading locks for each repository. We rejected this due to deadlock hazards during multi-record booking/completion workflows and unified synchronization into a single `InProcessMutationGuard`.
+  - *Rejected Speculative Vehicle Class Hierarchies:* AI attempted to create abstract vehicle class hierarchies (`class Sedan(Vehicle)`). We rejected this over-engineering in favor of clean `CarType` enums and data-driven `RateCard` catalogs.
 
 ## Verification
+
+Run the full automated test suite and linter:
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -118,14 +135,5 @@ The API accepts `{"code":"FLAT20","discount_type":"flat","value":"20"}` and cont
 .venv/bin/python -m pip check
 ```
 
-Tests cover raw tier boundaries, rounding, minimum fares, car-type rates, coupons, upgrade billing, matching, state preservation on failure, snapshots, idempotent completion, histories, concurrent booking, and both interfaces. See [tests/README.md](tests/README.md).
+All 135 unit, workflow, edge-case, and concurrency tests pass. Run `.venv/bin/python -m ride_app demo` to see the repeatable end-to-end acceptance demo scenario.
 
-## Trade-offs and further work
-
-Linear driver/history scans and one process-wide lock favor correctness and clarity at interview scale. A database adapter would need transactions and uniqueness constraints; adding repository implementations alone is insufficient. Geographic indexing would improve matching at scale.
-
-Remote CLI mode, persistent storage, authentication, real demand telemetry, rating collection, and trusted trip-distance collection remain future work. Ratings are trusted registration input for this exercise. Cancellation records a fee; no payment collection occurs.
-
-## AI usage
-
-AI assisted with assignment analysis, architecture, scaffold, implementation, comments, and tests. Changes prompted during review included independent raw-tier tests because minimums mask errors, keeping requested and assigned car types separate, retaining immutable booking snapshots, and checking repeat completion before touching driver state. Speculative vehicle subclass hierarchies and distributed infrastructure were omitted to keep the solution explainable. Validation, pricing, matching, and workflow tests were run incrementally; adapter tests then verified the same behavior through CLI and HTTP.
